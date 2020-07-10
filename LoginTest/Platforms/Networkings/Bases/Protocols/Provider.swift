@@ -7,9 +7,10 @@
 //
 
 import Foundation
+import RxSwift
 
 protocol Provider {
     associatedtype EndPointProvider: EndPoint
-    func request(_ endPoint: EndPointProvider, completion: @escaping (NetworkResponse) -> ())
+    func request<T: Decodable>(_ endPoint: EndPointProvider, withType: T.Type) -> Observable<T>
     func cancel()
 }

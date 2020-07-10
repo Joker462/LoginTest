@@ -7,86 +7,74 @@
 //
 
 import Foundation
+import RxSwift
+import RxCocoa
 
-// MARK: - Input -
-protocol LoginViewInput {
-    // View cycles
-    func viewDidLoad()
+final class LoginViewModel: ViewModelType {
     
-    // Events
-    func loginButtonClicked(_ email: String, _ password: String)
-}
-
-// MARK: - Output -
-protocol LoginViewOutput: class {
-    func showView(isLoading: Bool)
-}
-
-final class LoginViewModel: LoginViewInput {
+    struct Input {
+        let email: Driver<String>
+        let password: Driver<String>
+        let loginTaps: Signal<Void>
+    }
     
-    // MARK: - Output protocol
-    weak var output: LoginViewOutput?
+    struct Output {
+        let validatedEmail: Driver<ValidationResult>
+        let validatedPassword: Driver<ValidationResult>
+        let login: Driver<AccountResponse>
+        let loginProcessing: Driver<Bool>
+        let loginEnabled: Driver<Bool>
+        let loginError: Driver<Error>
+    }
     
     // MARK: - Properties
-    fileprivate let navigator: LoginNavigator
-    fileprivate let provider = URLSessionProvider<AccountEndPoint>()
-    fileprivate let accountUserDefault = AccountUserDefault()
+    private let provider = URLSessionProvider<AccountEndPoint>()
+    private let accountUserDefault = AccountUserDefault()
+    private let activityIndicator = ActivityIndicator()
+    private let errorTracker = ErrorTracker()
     
-    // MARK: - Construction
-    init(navigator: LoginNavigator, output: LoginViewOutput) {
-        self.navigator = navigator
-        self.output = output
-    }
-    
-    // MARK: - View cycles
-    func viewDidLoad() {
-        if let accountStore = accountUserDefault.getAccount() {
-            let account = Account(email: accountStore.email, password: accountStore.password)
-            requestLogin(account)
-        } else {
-            output?.showView(isLoading: false)
+    func transform(input: Input) -> Output {
+        let validatedEmail = input.email
+            .flatMapLatest { email in
+                return LoginValidationServices.shared.validateEmail(email)
+                    .asDriver(onErrorJustReturn: .failed(message: "Username not correct"))
         }
-    }
-    
-    // MARK: - Events
-    func loginButtonClicked(_ email: String, _ password: String) {
-        if email.isEmpty {
-            navigator.navigate(option: .alert("Please input your email"))
-        } else if password.isEmpty {
-            navigator.navigate(option: .alert("Please input your password"))
-        } else {
-            let account = Account(email: email, password: password)
-            requestLogin(account)
+        
+        let validatedPassword = input.password
+            .map { password in
+                return LoginValidationServices.shared.validatePassword(password)
         }
-    }
-}
-
-// MARK: - Private methods
-private extension LoginViewModel {
-    func requestLogin(_ account: Account) {
-        output?.showView(isLoading: true)
-        provider.request(.login(account)) { (response) in
-            DispatchQueue.main.async {
-                self.output?.showView(isLoading: false)
-                switch response {
-                case .success(let data):
-                    do {
-                    let accountResponse = try JSONDecoder().decode(AccountResponse.self, from: data)
-                        if accountResponse.result {
-                            var accountStore = try AccountStore(dict: accountResponse.data)
-                            accountStore.password = account.password
-                            self.accountUserDefault.save(accountStore)
-                            self.navigator.navigate(option: .tabBarScene)
-                        } else {
-                            self.navigator.navigate(option: .alert(accountResponse.message))
-                        }
-                    } catch {
-                        self.navigator.navigate(option: .alert(error.localizedDescription))
-                    }
-                case .failure(let error):
-                    print(error)
-                }
-            }
+        
+        let loginProcessing = activityIndicator.asDriver()
+        let loginError = errorTracker.asDriver()
+        
+        let loginEnabled = Driver.combineLatest(
+               validatedEmail,
+               validatedPassword,
+               loginProcessing) { username, password, loginProcessing in
+                   username.isValid &&
+                   password.isValid &&
+                   !loginProcessing
+               }
+               .distinctUntilChanged()
+        
+        let usernameAndPassword = Driver.combineLatest(input.email, input.password) { email, password in
+            return Account(email: email, password: password)
         }
+        
+        let login = input.loginTaps.withLatestFrom(usernameAndPassword)
+            .flatMapLatest { account in
+                return self.provider.request(.login(account), withType: AccountResponse.self)
+                    .trackActivity(self.activityIndicator)
+                    .trackError(self.errorTracker)
+                    .asDriverOnErrorJustComplete()
+        }
+        
+        return Output(validatedEmail: validatedEmail,
+                      validatedPassword: validatedPassword,
+                      login: login,
+                      loginProcessing: loginProcessing,
+                      loginEnabled: loginEnabled,
+                      loginError: loginError)
     }
 }

@@ -7,7 +7,7 @@
 //
 
 import Foundation
-import Combine
+import RxSwift
 
 final class URLSessionProvider<EndPointProvider: EndPoint>: Provider {
     
@@ -18,19 +18,30 @@ final class URLSessionProvider<EndPointProvider: EndPoint>: Provider {
         self.session = session
     }
     
-    func request(_ endPoint: EndPointProvider, completion: @escaping (NetworkResponse) -> ()) {
-        guard let request = URLRequest(endPoint: endPoint) else { return }
-        // Can be log network request here
-        print("URL  \(request.url!)")
-        task = session.dataTask(request: request, completionHandler: { data, response, error in
-            guard error == nil, let data = data else {
-                completion(.failure(error!.localizedDescription))
-                return
-            }
+    func request<T: Decodable>(_ endPoint: EndPointProvider, withType: T.Type) -> Observable<T> {
+        return Observable<T>.create { observer in
+            guard let request = URLRequest(endPoint: endPoint) else {
+                fatalError("URLRequest cannot initialize") }
             
-            completion(.success(data))
-        })
-        task?.resume()
+            self.task = self.session.dataTask(request: request, completionHandler: { data, response, error in
+                guard error == nil else {
+                    observer.onError(error!)
+                    return
+                }
+                do {
+                    let model = try JSONDecoder().decode(withType, from: data ?? Data())
+                    observer.onNext(model)
+                } catch let error {
+                    observer.onError(error)
+                }
+                observer.onCompleted()
+            })
+            self.task?.resume()
+            
+            return Disposables.create {
+                self.task?.cancel()
+            }
+        }
     }
     
     func cancel() {
